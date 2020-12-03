@@ -1,0 +1,127 @@
+name: DjangoGunicornNginxInstallation
+description: Component is install to setup myapp environment
+schemaVersion: 1.0
+
+phases:
+  - name: build
+    steps:
+      - name: UpdateOS
+        action: UpdateOS
+        onFailure: Abort
+        maxAttempts: 3
+      
+      - name: InstallPythonAndDependencies
+        action: ExecuteBash
+        inputs:
+          commands:
+            - sudo apt install python3-pip python3-dev libpq-dev nginx curl -y
+            - sudo -H pip3 install --upgrade pip
+      
+      - name: CreatingAppFolder
+        action: CreateFolder
+        inputs:
+          - path: /home/ubuntu/myapp
+
+      - name: InstallVirtualenv
+        action: ExecuteBash
+        inputs:
+          commands:
+            - sudo -H pip3 install virtualenv
+      
+      - name: CreateVirtualenv
+        action: ExecuteBash
+        inputs:
+          commands:
+            - cd /home/ubuntu/myapp && virtualenv myappvenv
+            - sudo chown ubuntu:ubuntu -R /home/ubuntu/myapp
+
+      - name: ActiavteVirtualenvAndInstallPackages
+        action: ExecuteBash
+        inputs:
+          commands:
+            - source  /home/ubuntu/myapp/myappvenv/bin/activate
+            - pip install django gunicorn psycopg2-binary
+            - cd /home/ubuntu/myapp && django-admin startproject app
+            - sudo chown ubuntu:ubuntu -R /home/ubuntu/myapp
+            - cd /home/ubuntu/myapp/app && python3 manage.py migrate
+
+      - name: CreateGunicornSocketFile
+        action: CreateFile
+        inputs:
+          - path: /etc/systemd/system/gunicorn.socket
+            content: |
+              [Unit]
+              Description=gunicorn socket
+
+              [Socket]
+              ListenStream=/run/gunicorn.sock
+
+              [Install]
+              WantedBy=sockets.target
+      
+      - name: CreateGunicornServiceFile
+        action: CreateFile
+        inputs:
+          - path: /etc/systemd/system/gunicorn.service
+            content: |
+              [Unit]
+              Description=gunicorn daemon
+              Requires=gunicorn.socket
+              After=network.target
+
+              [Service]
+              User=ubuntu
+              Group=www-data
+              WorkingDirectory=/home/ubuntu/myapp/app/ 
+              ExecStart=/home/ubuntu/myapp/myappvenv/bin/gunicorn \
+                        --access-logfile - \
+                        --workers 3 \
+                        --bind unix:/run/gunicorn.sock \
+                        app.wsgi:application
+
+              [Install]
+              WantedBy=multi-user.target            
+      
+      - name: StartAndEnableGunicornSocket
+        action: ExecuteBash
+        inputs:
+          commands:
+            - sudo systemctl start gunicorn.socket gunicorn.service
+            - sudo systemctl enable gunicorn.socket
+            - sudo systemctl status gunicorn.socket
+            - sudo journalctl -u gunicorn.socket
+            - sudo systemctl daemon-reload
+            - sudo systemctl restart gunicorn
+
+      - name: CopyNginxFileToBak
+        action: CopyFile
+        inputs:
+          - source: /etc/nginx/sites-available/default
+            destination: /etc/nginx/sites-available/default.bak
+
+      - name: CreateDefaultNginxFile
+        action: CreateFile
+        inputs:
+          - path: /etc/nginx/sites-available/default
+            content: |
+              server {
+                listen 80;
+                server_name _;
+
+                location = /favicon.ico { access_log off; log_not_found off; }
+                location /static/ {
+                    root /home/ubuntu/myapp/app;
+                }
+
+                location / {
+                    include proxy_params;
+                    proxy_pass http://unix:/run/gunicorn.sock;
+                }
+              }
+
+      - name: CheckNginxConfigurationAndRestart
+        action: ExecuteBash
+        inputs:
+          commands:
+            - sudo nginx -t
+            - sudo systemctl restart nginx
